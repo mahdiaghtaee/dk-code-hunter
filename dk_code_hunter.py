@@ -5,9 +5,11 @@ import csv
 import heapq
 import hashlib
 import io
+import json
 import re
 import sys
 import time
+import math
 from collections import defaultdict
 from datetime import date
 from pathlib import Path
@@ -138,6 +140,51 @@ def spot_image_priority(url, label='', page=''):
         # News carousel membership alone is not advertising evidence.
         return 20 * strong + 8 * (service and strong)
     return 20 * strong + 8 * service + 5 * bool(SPOT_IMAGE.search(label))
+
+
+def browser_banner_rows(payload, include_static=False):
+    rows = payload if isinstance(payload, list) else payload.get('images', [])
+    if not isinstance(rows, list):
+        raise ValueError('Browser manifest images must be a list')
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get('url'), str):
+            continue
+        url = canonical(row['url'], True)
+        if not allowed_host(url, asset=True) or not is_raster_candidate(url):
+            continue
+        path = urlsplit(url).path.lower()
+        ad = '/digikala-adservice-banners/' in path
+        static = '/digikala-static/' in path and include_static
+        if not (ad or static) or url in seen:
+            continue
+        try:
+            w, h = int(row.get('width', 0)), int(row.get('height', 0))
+        except (ValueError, TypeError, OverflowError):
+            continue
+        if w < 250 or h < 70:
+            continue
+        seen.add(url)
+        page = row.get('page') or (payload.get('page') if isinstance(payload, dict) else None)
+        if not isinstance(page, str) or not allowed_host(page):
+            page = url
+        label = str(row.get('alt') or '')
+        score = (100 if ad else 30) + 20 * bool(CONTEXT.search(label))
+        yield url, canonical(page, page == url), score
+
+
+def tile_boxes(width, height):
+    # Use additional horizontal strips for exceptionally wide banners.
+    nx = max(2, min(16, math.ceil(width / max(1, height * 2))))
+    ny = max(1, min(4, math.ceil(height / max(1, width * 2))))
+    if nx == 2 and ny == 1 and width / max(1, height) < 3:
+        ny = 2
+    for x in range(nx):
+        for y in range(ny):
+            yield (int(max(0, x - .25) * width / nx),
+                   int(max(0, y - .25) * height / ny),
+                   math.ceil(min(nx, x + 1.25) * width / nx),
+                   math.ceil(min(ny, y + 1.25) * height / ny))
 
 
 def priority(url, text=''):
@@ -415,10 +462,14 @@ class Hunter:
             print('[OCR] Disabled by --no-ocr')
             return
         try:
-            pytesseract.get_tesseract_version()
+            engine = str(pytesseract.get_tesseract_version())
         except Exception as exc:
             print(f'[OCR] Tesseract unavailable: {exc}')
             return
+        cache = Path(self.args.cache_dir)
+        if not self.args.no_cache:
+            cache.mkdir(parents=True, exist_ok=True)
+
         # Campaign-related images first, then remaining image URLs.
         ranked = sorted(self.images, key=lambda u: -self.image_scores.get(u, 0))
         print(f'[OCR] {len(ranked)} image URLs collected; scanning up to {self.args.max_images}')
@@ -462,21 +513,25 @@ class Hunter:
                         if self.args.deep_ocr:
                             variants.extend([(img, 11), (ImageOps.invert(gray), 11)])
                         if self.args.tiles:
-                            # Four overlapping crops preserve small text that is lost in full banners.
-                            w, h = gray.size
-                            for x in (0, 1):
-                                for y in (0, 1):
-                                    crop = gray.crop((0 if x == 0 else w * 2 // 5,
-                                                      0 if y == 0 else h * 2 // 5,
-                                                      w * 3 // 5 if x == 0 else w,
-                                                      h * 3 // 5 if y == 0 else h))
-                                    if min(crop.size) > 0:
-                                        factor = max(1, min(3, 1200 / max(crop.size)))
-                                        crop = crop.resize(tuple(round(v * factor) for v in crop.size), Image.Resampling.LANCZOS)
-                                        variants.append((crop, 11))
+                            for coords in tile_boxes(*gray.size):
+                                crop = gray.crop(coords)
+                                if min(crop.size) > 0:
+                                    factor = max(1, min(3, 1200 / max(crop.size)))
+                                    crop = crop.resize(tuple(round(v * factor) for v in crop.size), Image.Resampling.LANCZOS)
+                                    variants.append((crop, 11))
                         for pass_no, (variant, psm) in enumerate(variants, 1):
-                            text = pytesseract.image_to_string(variant, lang='eng', config=f'--psm {psm}', timeout=10)
-                            self.stats['ocr_passes'] += 1
+                            key = hashlib.sha256(
+                                f'{engine}|eng|psm={psm}|{variant.mode}|{variant.size}|'.encode()
+                                + variant.tobytes()).hexdigest()
+                            entry = cache / (key + '.txt')
+                            if not self.args.no_cache and entry.is_file():
+                                text = entry.read_text(encoding='utf-8')
+                                self.stats['ocr_cache_hits'] += 1
+                            else:
+                                text = pytesseract.image_to_string(variant, lang='eng', config=f'--psm {psm}', timeout=10)
+                                self.stats['ocr_passes'] += 1
+                                if not self.args.no_cache:
+                                    entry.write_text(text, encoding='utf-8')
                             if self.args.ocr_debug:
                                 (debug / f'{i:05}_{frame}_{pass_no}.txt').write_text(url + '\n\n' + text, encoding='utf-8')
                             if PATTERN.search(text):
@@ -495,6 +550,10 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--url', action='append', help='Start URL; repeat for several URLs')
     p.add_argument('--image-url', action='append', help='Scan only the specified public image URLs')
+    p.add_argument('--browser-json', type=Path, help='Import banner URLs exported from the visible browser DOM')
+    p.add_argument('--include-static', action='store_true', help='Also include non-product static images from browser manifest')
+    p.add_argument('--cache-dir', default='dk_ocr_cache', help='Local OCR text cache shared by scans')
+    p.add_argument('--no-cache', action='store_true', help='Always perform OCR again')
     p.add_argument('--campaign-month', default=date.today().strftime('%Y-%m'), help='Earliest dated upload month, YYYY-MM; --broad disables the filter')
     p.add_argument('--ocr-debug', action='store_true', help='Save raw OCR text for each pass')
     p.add_argument('--tiles', action='store_true', help='Also scan overlapping image crops; slower')
@@ -519,6 +578,8 @@ def main():
         p.error('--campaign-month must be YYYY-MM')
     if a.spots and a.broad:
         p.error('--spots and --broad cannot be combined')
+    if a.browser_json and (a.url or a.image_url or a.render):
+        p.error('--browser-json cannot be combined with --url, --image-url or --render')
     if a.image_url and (a.url or a.no_ocr or len(a.image_url) > a.max_images):
         p.error('--image-url is OCR-only and must fit --max-images')
     if a.image_url and any(not allowed_host(u, asset=True) or not is_raster_candidate(u) for u in a.image_url):
@@ -527,7 +588,18 @@ def main():
         pytesseract.pytesseract.tesseract_cmd = a.tesseract
     hunter = Hunter(a)
     try:
-        if a.image_url:
+        if a.browser_json:
+            try:
+                manifest = json.loads(a.browser_json.read_text(encoding='utf-8-sig'))
+                if not isinstance(manifest, (dict, list)):
+                    raise ValueError('Expected an object or list')
+                for url, page, score in browser_banner_rows(manifest, a.include_static):
+                    hunter.images[url].add(page)
+                    hunter.image_scores[url] = score
+            except (OSError, ValueError) as exc:
+                p.error(f'Invalid browser manifest: {exc}')
+            print(f'[BROWSER] {len(hunter.images)} selected banner URLs')
+        elif a.image_url:
             for url in a.image_url:
                 url = canonical(url, True)
                 hunter.images[url].add(url)

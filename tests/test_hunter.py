@@ -86,6 +86,22 @@ class HunterTests(unittest.TestCase):
         self.assertEqual(spot_image_priority('https://www.digikala.com/mag/gta.jpg', 'carousel', page), 0)
         self.assertGreater(spot_image_priority('https://www.digikala.com/mag/banner.jpg', '', page), 0)
 
+    def test_browser_banner_manifest(self):
+        from dk_code_hunter import browser_banner_rows
+        base = 'https://dkstatics-public.digikala.com/'
+        rows = [{'url': base + kind + '/x.jpg', 'width': 2800, 'height': 100}
+                for kind in ('digikala-adservice-banners', 'digikala-static', 'digikala-products')]
+        self.assertEqual(len(list(browser_banner_rows(rows))), 1)
+        self.assertEqual(len(list(browser_banner_rows(rows, True))), 2)
+
+    def test_wide_banner_tiles(self):
+        from dk_code_hunter import tile_boxes
+        boxes = list(tile_boxes(14251, 512))
+        self.assertGreater(len(boxes), 4)
+        self.assertLessEqual(len(boxes), 16)
+        self.assertEqual(boxes[0][0], 0)
+        self.assertEqual(boxes[-1][2], 14251)
+
 
 if __name__ == '__main__':
     unittest.main()

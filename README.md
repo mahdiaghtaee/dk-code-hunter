@@ -76,3 +76,13 @@ python dk_code_hunter.py --spots --max-pages 15 --max-images 24 --tiles --output
 Spot mode ranks public service links and static banner, footer, slider and shortcut image candidates ahead of generic shopping articles. It skips the redemption page and video pages; it does not scan video files. Only links within the existing allowed domain scope are followed. `image_inventory.csv` lists ranked image URLs with their source pages. Rankings are heuristics, not proof of hidden codes. Tile OCR can still take time. Use `--url` to supply specific public starting pages.
 
 In spot mode the default starting pages now exclude the magazine. Use `--include-mag` to follow magazine links or an explicit `--url` to inspect one magazine page. Generic magazine carousels no longer receive advertising priority. For a quick diagnostic, run `python dk_code_hunter.py --spots --url https://www.digikala.com/ --depth 0 --max-pages 1 --no-ocr --output dk_home_audit`. This writes `page_inventory.csv` and `image_inventory.csv` without downloading images. A page with zero selected images may require manual inspection of the visible browser page; this mode does not bypass restrictions or prove that no banners exist.
+
+### Browser banner import
+
+Open a public page normally in your browser. Run the contents of `export_banners.js` in the developer console to save `dk-browser-images.json` (only loaded image URLs and their dimensions/alt text, no additional network requests). Save the JSON in the project directory, then run:
+
+```powershell
+python dk_code_hunter.py --browser-json dk-browser-images.json --tiles --output dk_browser
+```
+
+This scans only listed advertising banner assets, subject to existing robots and request limits. Add `--include-static` to include the listed static assets too. OCR text is cached locally by pixel content and engine version; subsequent runs still download the images to check their content, but reuse cached OCR. Use `--no-cache` to force OCR. Wide banners use overlapping horizontal tiles. No videos are scanned in this mode.

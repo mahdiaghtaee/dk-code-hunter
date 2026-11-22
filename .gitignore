@@ -7,3 +7,6 @@ __pycache__/
 .idea/
 .env
 dk_results/
+
+dk_*/
+dk-browser-images*.json
