@@ -80,6 +80,12 @@ class HunterTests(unittest.TestCase):
         self.assertGreater(spot_image_priority('https://www.digikala.com/abc.webp', 'hero banner'),
                            spot_image_priority('https://www.digikala.com/jakodi-tutorial-2.jpg'))
 
+    def test_magazine_carousel_is_not_ad(self):
+        from dk_code_hunter import spot_image_priority
+        page = 'https://www.digikala.com/mag/'
+        self.assertEqual(spot_image_priority('https://www.digikala.com/mag/gta.jpg', 'carousel', page), 0)
+        self.assertGreater(spot_image_priority('https://www.digikala.com/mag/banner.jpg', '', page), 0)
+
 
 if __name__ == '__main__':
     unittest.main()

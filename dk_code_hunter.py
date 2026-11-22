@@ -36,8 +36,6 @@ SPOT_SEEDS = [
     'https://www.digikala.com/landing/black-friday/',
     'https://www.digikala.com/landings/new-app/',
     'https://www.digikala.com/landing/voucher-digikala/',
-    'https://www.digikala.com/mag/',
-    'https://www.digikala.com/mag/tag/black-friday/',
 ]
 HINTS = ('black-friday','blackfriday','prize','catcher','jakodi','jako','campaign',
          'banner','voucher','landing','promotion','festival','newsroom',
@@ -130,10 +128,16 @@ def spot_page_priority(url, label=''):
         CAMPAIGN_PATH.search(url + ' ' + label))
 
 
-def spot_image_priority(url, label=''):
-    return 15 * bool(SPOT_IMAGE.search(url + ' ' + label)) + 8 * bool(
-        SPOT_HINT.search(url + ' ' + label)) - 12 * bool(
-        re.search(r'jakodi-tutorial|jakodi-featured', url, re.I))
+def spot_image_priority(url, label='', page=''):
+    explicit_ad = re.compile(r'banner|advertis|promotion|campaign|billboard|بنر|تبلیغ', re.I)
+    if re.search(r'jakodi-tutorial|jakodi-featured', url, re.I):
+        return -12
+    strong = bool(explicit_ad.search(url + ' ' + label))
+    service = bool(SPOT_HINT.search(url + ' ' + label))
+    if '/mag/' in urlsplit(page).path.lower():
+        # News carousel membership alone is not advertising evidence.
+        return 20 * strong + 8 * (service and strong)
+    return 20 * strong + 8 * service + 5 * bool(SPOT_IMAGE.search(label))
 
 
 def priority(url, text=''):
@@ -151,6 +155,7 @@ class Hunter:
         self.findings = set()
         self.images = defaultdict(set)
         self.image_scores = {}
+        self.page_inventory = []
         self.image_hashes = set()
         self.unconfirmed = set()
         self.stats = defaultdict(int)
@@ -259,7 +264,7 @@ class Hunter:
         if not seed and (any(x in path for x in BLOCK) or re.search(r'\.[a-z0-9]{2,5}$', path)):
             return
         score = spot_page_priority(url, text) if self.args.spots else priority(url, text)
-        if self.args.spots and score < 0:
+        if self.args.spots and (score < 0 or (not seed and '/mag/' in path and not self.args.include_mag)):
             return
         if not seed and score == 0 and not self.args.broad:
             return
@@ -272,8 +277,8 @@ class Hunter:
             return
         url = canonical(urljoin(page, value.strip()), True)
         if allowed_host(url, asset=True) and not skip_image(url, self.args.campaign_month, self.args.broad):
-            score = (spot_image_priority(url, label) if self.args.spots else image_priority(url, page, label))
-            if not self.args.broad and score < 0:
+            score = (spot_image_priority(url, label, page) if self.args.spots else image_priority(url, page, label))
+            if (self.args.spots and score <= 0) or (not self.args.broad and score < 0):
                 return
             self.images[url].add(page)
             self.image_scores[url] = max(score, self.image_scores.get(url, -100))
@@ -292,9 +297,10 @@ class Hunter:
                 continue
             label_parts = [tag.get('alt', ''), tag.get('title', ''), ' '.join(tag.get('class', []))]
             if self.args.spots:
-                for parent in list(tag.parents)[:4]:
-                    label_parts.extend([' '.join(parent.get('class', [])), parent.get('id', ''),
-                                        parent.get('aria-label', '')])
+                if '/mag/' not in urlsplit(url).path.lower():
+                    for parent in list(tag.parents)[:2]:
+                        label_parts.extend([' '.join(parent.get('class', [])), parent.get('id', ''),
+                                            parent.get('aria-label', '')])
                 link = tag.find_parent('a')
                 if link:
                     label_parts.extend([link.get('title', ''), link.get('href', '')])
@@ -323,6 +329,9 @@ class Hunter:
             t.decompose()
         self.report(soup.get_text(' ', strip=True), url, method + ':text')
         self.stats['pages_parsed'] += 1
+        accepted = sum(url in pages for pages in self.images.values())
+        self.page_inventory.append((url, method, len(soup.find_all('img')), accepted, len(html)))
+        print(f'[PAGE ASSETS] {url} | img tags={len(soup.find_all("img"))} | selected={accepted}')
         self.save()
 
     def render(self, url, depth):
@@ -389,6 +398,18 @@ class Hunter:
                         self.render(url, depth)
         self.save()
 
+    def write_inventory(self):
+        ranked = sorted(self.images, key=lambda u: -self.image_scores.get(u, 0))
+        with (self.out / 'image_inventory.csv').open('w', encoding='utf-8-sig', newline='') as f:
+            w = csv.writer(f)
+            w.writerow(('score', 'image_url', 'page_urls'))
+            for u in ranked:
+                w.writerow((self.image_scores[u], u, ' | '.join(sorted(self.images[u]))))
+        with (self.out / 'page_inventory.csv').open('w', encoding='utf-8-sig', newline='') as f:
+            w = csv.writer(f)
+            w.writerow(('page_url', 'method', 'img_tags', 'selected_images', 'html_chars'))
+            w.writerows(self.page_inventory)
+
     def ocr(self):
         if self.args.no_ocr:
             print('[OCR] Disabled by --no-ocr')
@@ -400,12 +421,6 @@ class Hunter:
             return
         # Campaign-related images first, then remaining image URLs.
         ranked = sorted(self.images, key=lambda u: -self.image_scores.get(u, 0))
-        if self.args.spots:
-            with (self.out / 'image_inventory.csv').open('w', encoding='utf-8-sig', newline='') as f:
-                w = csv.writer(f)
-                w.writerow(('score', 'image_url', 'page_urls'))
-                for u in ranked:
-                    w.writerow((self.image_scores[u], u, ' | '.join(sorted(self.images[u]))))
         print(f'[OCR] {len(ranked)} image URLs collected; scanning up to {self.args.max_images}')
         evidence = self.out / 'evidence'
         evidence.mkdir(exist_ok=True)
@@ -490,7 +505,8 @@ def main():
     p.add_argument('--output', default='dk_results')
     p.add_argument('--broad', action='store_true', help='Also follow non-campaign public links')
     p.add_argument('--spots', action='store_true', help='Prioritize public service shortcuts and unusual static banner locations; skip video and redemption pages')
-    p.add_argument('--no-ocr', action='store_true')
+    p.add_argument('--include-mag', action='store_true', help='Allow following magazine links in spot mode')
+    p.add_argument('--no-ocr', action='store_true', help='Collect page and image inventories without downloading images')
     p.add_argument('--deep-ocr', action='store_true', help='Try inverted images and additional animation frames')
     p.add_argument('--exclude', action='append', default=[], type=str.upper, help='Ignore a known irrelevant code; repeat as needed')
     p.add_argument('--render', action='store_true', help='Optionally render public HTML and scripts with Playwright')
@@ -518,6 +534,7 @@ def main():
                 hunter.image_scores[url] = image_priority(url, url)
         else:
             hunter.crawl()
+        hunter.write_inventory()
         hunter.ocr()
     except KeyboardInterrupt:
         print('\n[STOP] Saving collected results.')
