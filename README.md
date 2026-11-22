@@ -36,6 +36,8 @@ python dk_code_hunter.py --broad --render --max-pages 100 --max-images 200 --dep
 python dk_code_hunter.py --help
 ```
 
+The default run checks up to 18 pages and 40 images. Use `--deep-ocr` for more image passes and animation frames, or `--exclude DKABC` to ignore a confirmed irrelevant token. Raw HTML identifiers are no longer treated as codes. Weak matches are kept in `unconfirmed.csv`; candidate codes are still unverified. The console reports successful page parses, OCR passes and blocked or unavailable requests.
+
 Results are written to `dk_results/`: `results.csv` contains source URLs and discovery methods, `codes.txt` lists distinct candidates, `new_codes.txt` excludes previously listed codes, and `evidence/` contains matching OCR images. Results are candidates, not verified discount codes. Existing result lists are replaced by a new run.
 
 The crawler uses public HTTPS pages, respects robots.txt, limits requests, and stops requesting hosts that return HTTP 403 or 429. Browser rendering is restricted and may not work on pages requiring API calls. Review the site's rules before scanning; do not use this utility to bypass access restrictions or submit automated coupon attempts.
