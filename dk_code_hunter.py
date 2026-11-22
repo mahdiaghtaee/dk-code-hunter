@@ -9,6 +9,7 @@ import re
 import sys
 import time
 from collections import defaultdict
+from datetime import date
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from protego import Protego
@@ -48,7 +49,7 @@ def configure_console():
 
 
 def is_raster_candidate(url):
-    return not urlsplit(url).path.lower().endswith(('.svg', '.svgz', '.ico'))
+    return not urlsplit(url).path.lower().endswith(('.svg', '.svgz', '.ico', '.mp4', '.webm', '.mov', '.mp3', '.m4v', '.pdf'))
 
 
 def allowed_host(url, asset=False):
@@ -65,7 +66,22 @@ def canonical(url, keep_query=False):
 
 CONTEXT = re.compile(r'جاک[ُُ]?دی|کد\s*(?:تخفیف|جایزه|هدیه|مخفی)|black[\s-]?friday|promo\s*code|coupon|prize[\s-]?catcher|voucher', re.I)
 CAMPAIGN_PATH = re.compile(r'jakodi|prize-catcher|black-friday|blackfriday|campaign|voucher|banner|slider', re.I)
-PRODUCT_IMAGE = re.compile(r'/products?/|/product_images?/|/icons?/|/logos?/', re.I)
+PRODUCT_IMAGE = re.compile(r'/(?:digikala-products|products?|product_images?|icons?|logos?)/', re.I)
+THUMBNAIL = re.compile(r'-(?:60|100|150|200)x(?:60|100|150|200)(?=\.[a-z]+$)', re.I)
+UPLOAD_MONTH = re.compile(r'/uploads/(\d{4})/(\d{2})/')
+JAKODI = re.compile(r'jakodi|prize-catcher|jako-di', re.I)
+
+
+def skip_image(url, campaign_month, broad=False):
+    if not is_raster_candidate(url):
+        return True
+    if broad:
+        return False
+    path = urlsplit(url).path
+    uploaded = UPLOAD_MONTH.search(path)
+    if uploaded and '-'.join(uploaded.groups()) < campaign_month:
+        return True
+    return bool(PRODUCT_IMAGE.search(path) or THUMBNAIL.search(path))
 
 
 def candidate_matches(text, context='', excluded=()):
@@ -81,7 +97,8 @@ def candidate_matches(text, context='', excluded=()):
 
 
 def image_priority(url, page, label=''):
-    return (5 * bool(CAMPAIGN_PATH.search(url))
+    return (20 * bool(JAKODI.search(url))
+            + 5 * bool(CAMPAIGN_PATH.search(url))
             + 3 * bool(CONTEXT.search(label))
             + 2 * bool(CAMPAIGN_PATH.search(page))
             + 2 * bool(re.search(r'banner|slider|hero|campaign', label, re.I))
@@ -221,7 +238,7 @@ class Hunter:
         if not value or value.startswith(('data:', 'blob:')):
             return
         url = canonical(urljoin(page, value.strip()), True)
-        if allowed_host(url, asset=True) and is_raster_candidate(url):
+        if allowed_host(url, asset=True) and not skip_image(url, self.args.campaign_month, self.args.broad):
             score = image_priority(url, page, label)
             if not self.args.broad and score < 0:
                 return
@@ -233,6 +250,8 @@ class Hunter:
         for a in soup.find_all('a', href=True):
             self.enqueue(urljoin(url, a['href']), depth + 1, a.get_text(' ', strip=True))
         for tag in soup.find_all(['img', 'source']):
+            if tag.name == 'source' and tag.find_parent(['video', 'audio']):
+                continue
             label = ' '.join([tag.get('alt', ''), tag.get('title', ''), ' '.join(tag.get('class', []))])
             variants = (tag.get('data-srcset') or tag.get('srcset') or '').split(',')
             variants = [v.strip().split() for v in variants if v.strip()]
@@ -338,13 +357,17 @@ class Hunter:
         print(f'[OCR] {len(ranked)} image URLs collected; scanning up to {self.args.max_images}')
         evidence = self.out / 'evidence'
         evidence.mkdir(exist_ok=True)
+        debug = self.out / 'ocr_text'
+        if self.args.ocr_debug:
+            debug.mkdir(exist_ok=True)
         for i, url in enumerate(ranked[:self.args.max_images], 1):
             print(f'[IMAGE {i}/{min(len(ranked), self.args.max_images)}] {url}')
             result = self.fetch(url, asset=True)
             if not result:
+                self.stats['images_unavailable'] += 1
                 continue
             content_type = result[1].split(';', 1)[0].strip().lower()
-            if content_type in ('image/svg+xml', 'text/html', 'application/xhtml+xml'):
+            if content_type.startswith(('video/', 'audio/')) or content_type in ('image/svg+xml', 'text/html', 'application/xhtml+xml'):
                 self.stats['non_raster_images'] += 1
                 continue
             digest = hashlib.sha256(result[0]).digest()
@@ -355,6 +378,7 @@ class Hunter:
             try:
                 with Image.open(io.BytesIO(result[0])) as original:
                     if original.width < 100 or original.height < 50 or original.width * original.height > 25_000_000:
+                        self.stats['images_size_skipped'] += 1
                         continue
                     self.stats['images_ocr'] += 1
                     count = getattr(original, 'n_frames', 1)
@@ -367,10 +391,27 @@ class Hunter:
                         scale = min(3, max(1, 1500 / max(gray.size)))
                         if scale > 1:
                             gray = gray.resize(tuple(round(v * scale) for v in gray.size), Image.Resampling.LANCZOS)
-                        variants = (gray, ImageOps.invert(gray)) if self.args.deep_ocr else (gray,)
-                        for variant in variants:
-                            text = pytesseract.image_to_string(variant, lang='eng', config='--psm 11', timeout=10)
+                        variants = [(gray, 11)]
+                        if self.args.deep_ocr:
+                            variants.extend([(img, 11), (ImageOps.invert(gray), 11)])
+                        if self.args.tiles:
+                            # Four overlapping crops preserve small text that is lost in full banners.
+                            w, h = gray.size
+                            for x in (0, 1):
+                                for y in (0, 1):
+                                    crop = gray.crop((0 if x == 0 else w * 2 // 5,
+                                                      0 if y == 0 else h * 2 // 5,
+                                                      w * 3 // 5 if x == 0 else w,
+                                                      h * 3 // 5 if y == 0 else h))
+                                    if min(crop.size) > 0:
+                                        factor = max(1, min(3, 1200 / max(crop.size)))
+                                        crop = crop.resize(tuple(round(v * factor) for v in crop.size), Image.Resampling.LANCZOS)
+                                        variants.append((crop, 11))
+                        for pass_no, (variant, psm) in enumerate(variants, 1):
+                            text = pytesseract.image_to_string(variant, lang='eng', config=f'--psm {psm}', timeout=10)
                             self.stats['ocr_passes'] += 1
+                            if self.args.ocr_debug:
+                                (debug / f'{i:05}_{frame}_{pass_no}.txt').write_text(url + '\n\n' + text, encoding='utf-8')
                             if PATTERN.search(text):
                                 img.save(evidence / f'image_{i:05}_{frame}.png')
                                 for page in sorted(self.images[url]):
@@ -386,6 +427,10 @@ def main():
     configure_console()
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--url', action='append', help='Start URL; repeat for several URLs')
+    p.add_argument('--image-url', action='append', help='Scan only the specified public image URLs')
+    p.add_argument('--campaign-month', default=date.today().strftime('%Y-%m'), help='Earliest dated upload month, YYYY-MM; --broad disables the filter')
+    p.add_argument('--ocr-debug', action='store_true', help='Save raw OCR text for each pass')
+    p.add_argument('--tiles', action='store_true', help='Also scan overlapping image crops; slower')
     p.add_argument('--max-pages', type=int, default=18)
     p.add_argument('--max-images', type=int, default=40)
     p.add_argument('--depth', type=int, default=2)
@@ -401,11 +446,23 @@ def main():
     a = p.parse_args()
     if a.max_pages < 1 or a.max_images < 0 or a.depth < 0 or a.delay < 2:
         p.error('Use positive page counts, nonnegative image/depth counts and delay >= 2 seconds.')
+    if not re.fullmatch(r'\d{4}-(?:0[1-9]|1[0-2])', a.campaign_month):
+        p.error('--campaign-month must be YYYY-MM')
+    if a.image_url and (a.url or a.no_ocr or len(a.image_url) > a.max_images):
+        p.error('--image-url is OCR-only and must fit --max-images')
+    if a.image_url and any(not allowed_host(u, asset=True) or not is_raster_candidate(u) for u in a.image_url):
+        p.error('--image-url requires public Digikala HTTPS raster images')
     if Path(a.tesseract).is_file():
         pytesseract.pytesseract.tesseract_cmd = a.tesseract
     hunter = Hunter(a)
     try:
-        hunter.crawl()
+        if a.image_url:
+            for url in a.image_url:
+                url = canonical(url, True)
+                hunter.images[url].add(url)
+                hunter.image_scores[url] = image_priority(url, url)
+        else:
+            hunter.crawl()
         hunter.ocr()
     except KeyboardInterrupt:
         print('\n[STOP] Saving collected results.')

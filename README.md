@@ -51,3 +51,7 @@ python -m unittest discover -s tests -v
 ### Windows console encoding
 
 For UTF-8 logs, use `$env:PYTHONIOENCODING = 'utf-8'` and `python -X utf8 dk_code_hunter.py`. Legacy console encodings also fall back to escaped characters instead of aborting a scan. SVG and ICO assets are skipped by the raster OCR scanner.
+
+### Targeted image diagnostics
+
+The default scan skips dated uploads before the current month, small thumbnails, product images and video files. Use `--campaign-month YYYY-MM` to choose another campaign month, or `--broad` to include older and lower-priority images. `--image-url` scans specified public image URLs without crawling other pages; robots and HTTP restrictions still apply. `--ocr-debug` stores raw recognised text in `ocr_text/`. `--tiles` adds overlapping image crops, which may help small lettering but increases OCR time. Video files are not scanned.

@@ -1,6 +1,6 @@
 import unittest
 
-from dk_code_hunter import PATTERN, allowed_host, canonical, priority, candidate_matches, image_priority, configure_console, is_raster_candidate
+from dk_code_hunter import PATTERN, allowed_host, canonical, priority, candidate_matches, image_priority, configure_console, is_raster_candidate, skip_image
 
 
 class HunterTests(unittest.TestCase):
@@ -54,6 +54,19 @@ class HunterTests(unittest.TestCase):
             print('\u06cc')
             stream.flush()
             self.assertIn(b'\\u06cc', stream.buffer.getvalue())
+
+    def test_campaign_image_selection(self):
+        base = 'https://www.digikala.com/mag/wp-content/uploads/'
+        self.assertTrue(skip_image(base + '2025/11/black-friday.jpg', '2026-11'))
+        self.assertTrue(skip_image(base + '2026/11/jakodi-150x150.jpg', '2026-11'))
+        self.assertTrue(skip_image(base + '2026/11/jakodi.mp4', '2026-11', broad=True))
+        self.assertTrue(skip_image('https://dkstatics-public.digikala.com/digikala-products/photo.jpg', '2026-11'))
+        self.assertFalse(skip_image(base + '2026/11/jakodi-tutorial-2.jpg', '2026-11'))
+        self.assertFalse(skip_image(base + '2025/11/black-friday.jpg', '2026-11', broad=True))
+
+    def test_jakodi_priority(self):
+        self.assertGreater(image_priority('https://www.digikala.com/jakodi-tutorial-2.jpg', '', ''),
+                           image_priority('https://www.digikala.com/black-friday.jpg', '', ''))
 
 
 if __name__ == '__main__':
