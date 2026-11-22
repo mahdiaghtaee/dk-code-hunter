@@ -55,3 +55,14 @@ For UTF-8 logs, use `$env:PYTHONIOENCODING = 'utf-8'` and `python -X utf8 dk_cod
 ### Targeted image diagnostics
 
 The default scan skips dated uploads before the current month, small thumbnails, product images and video files. Use `--campaign-month YYYY-MM` to choose another campaign month, or `--broad` to include older and lower-priority images. `--image-url` scans specified public image URLs without crawling other pages; robots and HTTP restrictions still apply. `--ocr-debug` stores raw recognised text in `ocr_text/`. `--tiles` adds overlapping image crops, which may help small lettering but increases OCR time. Video files are not scanned.
+
+### Offline media scanning
+
+Save public advertising videos or screenshots you are permitted to use to your computer. To scan video files, install `requirements-video.txt`. The local scanner makes no website requests. For images only, the base requirements suffice.
+
+```powershell
+python -m pip install -r requirements-video.txt
+python scan_media.py video.mp4 screenshot.png --tiles --max-frames 60
+```
+
+Video sampling can miss brief appearances of codes; use a smaller interval and a higher frame limit when appropriate. Results and image evidence are stored under `dk_results/media/`. Candidates need visual review and manual validation.
