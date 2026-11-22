@@ -31,6 +31,14 @@ SEEDS = [
     'https://www.digikala.com/landings/new-app/',
     'https://www.digikala.com/landing/voucher-digikala/',
 ]
+SPOT_SEEDS = [
+    'https://www.digikala.com/',
+    'https://www.digikala.com/landing/black-friday/',
+    'https://www.digikala.com/landings/new-app/',
+    'https://www.digikala.com/landing/voucher-digikala/',
+    'https://www.digikala.com/mag/',
+    'https://www.digikala.com/mag/tag/black-friday/',
+]
 HINTS = ('black-friday','blackfriday','prize','catcher','jakodi','jako','campaign',
          'banner','voucher','landing','promotion','festival','newsroom',
          'بلک','جاکدی','جاکُدی','کمپین','جایزه')
@@ -103,6 +111,29 @@ def image_priority(url, page, label=''):
             + 2 * bool(CAMPAIGN_PATH.search(page))
             + 2 * bool(re.search(r'banner|slider|hero|campaign', label, re.I))
             - 8 * bool(PRODUCT_IMAGE.search(url)))
+
+
+SPOT_HINT = re.compile(
+    r'digi.?plus|digi.?gold|digi.?style|digi.?jet|digi.?pay|bazaar|vibe|'
+    r'gift.?card|supermarket|new-app|newsroom|about-us|contact-us|faq|'
+    r'دیجی[\s‌-]*(?:پلاس|استایل|جت|پی)|اشتراک\s*پلاس|طلای دیجیتال|'
+    r'طلا و نقره دیجیتال|بازار دیجی|وایب|سوپرمارکت|کارت هدیه|'
+    r'دانلود اپلیکیشن|اتاق خبر|درباره دیجی|تماس با دیجی|پرسش‌های متداول', re.I)
+SPOT_IMAGE = re.compile(r'banner|slider|hero|carousel|promotion|campaign|footer|billboard|badge|shortcut|بنر', re.I)
+
+
+def spot_page_priority(url, label=''):
+    path = urlsplit(url).path.lower()
+    if 'prize-catcher' in path or '/video/' in path:
+        return -100
+    return 15 * bool(SPOT_HINT.search(url + ' ' + label)) + 5 * bool(
+        CAMPAIGN_PATH.search(url + ' ' + label))
+
+
+def spot_image_priority(url, label=''):
+    return 15 * bool(SPOT_IMAGE.search(url + ' ' + label)) + 8 * bool(
+        SPOT_HINT.search(url + ' ' + label)) - 12 * bool(
+        re.search(r'jakodi-tutorial|jakodi-featured', url, re.I))
 
 
 def priority(url, text=''):
@@ -227,7 +258,9 @@ class Hunter:
         path = urlsplit(url).path.lower()
         if not seed and (any(x in path for x in BLOCK) or re.search(r'\.[a-z0-9]{2,5}$', path)):
             return
-        score = priority(url, text)
+        score = spot_page_priority(url, text) if self.args.spots else priority(url, text)
+        if self.args.spots and score < 0:
+            return
         if not seed and score == 0 and not self.args.broad:
             return
         self.queued.add(url)
@@ -239,7 +272,7 @@ class Hunter:
             return
         url = canonical(urljoin(page, value.strip()), True)
         if allowed_host(url, asset=True) and not skip_image(url, self.args.campaign_month, self.args.broad):
-            score = image_priority(url, page, label)
+            score = (spot_image_priority(url, label) if self.args.spots else image_priority(url, page, label))
             if not self.args.broad and score < 0:
                 return
             self.images[url].add(page)
@@ -248,11 +281,24 @@ class Hunter:
     def parse(self, html, url, depth, method='html'):
         soup = BeautifulSoup(html, 'html.parser')
         for a in soup.find_all('a', href=True):
-            self.enqueue(urljoin(url, a['href']), depth + 1, a.get_text(' ', strip=True))
+            label = ' '.join([a.get_text(' ', strip=True), a.get('title', ''),
+                              a.get('aria-label', '')] +
+                             [im.get('alt', '') for im in a.find_all('img')])
+            self.enqueue(urljoin(url, a['href']), depth + 1, label)
+            if self.args.spots:
+                self.report(label, url, method + ':link_label')
         for tag in soup.find_all(['img', 'source']):
             if tag.name == 'source' and tag.find_parent(['video', 'audio']):
                 continue
-            label = ' '.join([tag.get('alt', ''), tag.get('title', ''), ' '.join(tag.get('class', []))])
+            label_parts = [tag.get('alt', ''), tag.get('title', ''), ' '.join(tag.get('class', []))]
+            if self.args.spots:
+                for parent in list(tag.parents)[:4]:
+                    label_parts.extend([' '.join(parent.get('class', [])), parent.get('id', ''),
+                                        parent.get('aria-label', '')])
+                link = tag.find_parent('a')
+                if link:
+                    label_parts.extend([link.get('title', ''), link.get('href', '')])
+            label = ' '.join(label_parts)
             variants = (tag.get('data-srcset') or tag.get('srcset') or '').split(',')
             variants = [v.strip().split() for v in variants if v.strip()]
             def size(v):
@@ -326,7 +372,7 @@ class Hunter:
             print(f'[RENDER SKIP] {exc}')
 
     def crawl(self):
-        for seed in self.args.url or SEEDS:
+        for seed in self.args.url or (SPOT_SEEDS if self.args.spots else SEEDS):
             self.enqueue(seed, seed=True)
         for n in range(self.args.max_pages):
             if not self.queue:
@@ -354,6 +400,12 @@ class Hunter:
             return
         # Campaign-related images first, then remaining image URLs.
         ranked = sorted(self.images, key=lambda u: -self.image_scores.get(u, 0))
+        if self.args.spots:
+            with (self.out / 'image_inventory.csv').open('w', encoding='utf-8-sig', newline='') as f:
+                w = csv.writer(f)
+                w.writerow(('score', 'image_url', 'page_urls'))
+                for u in ranked:
+                    w.writerow((self.image_scores[u], u, ' | '.join(sorted(self.images[u]))))
         print(f'[OCR] {len(ranked)} image URLs collected; scanning up to {self.args.max_images}')
         evidence = self.out / 'evidence'
         evidence.mkdir(exist_ok=True)
@@ -437,6 +489,7 @@ def main():
     p.add_argument('--delay', type=float, default=2.5)
     p.add_argument('--output', default='dk_results')
     p.add_argument('--broad', action='store_true', help='Also follow non-campaign public links')
+    p.add_argument('--spots', action='store_true', help='Prioritize public service shortcuts and unusual static banner locations; skip video and redemption pages')
     p.add_argument('--no-ocr', action='store_true')
     p.add_argument('--deep-ocr', action='store_true', help='Try inverted images and additional animation frames')
     p.add_argument('--exclude', action='append', default=[], type=str.upper, help='Ignore a known irrelevant code; repeat as needed')
@@ -448,6 +501,8 @@ def main():
         p.error('Use positive page counts, nonnegative image/depth counts and delay >= 2 seconds.')
     if not re.fullmatch(r'\d{4}-(?:0[1-9]|1[0-2])', a.campaign_month):
         p.error('--campaign-month must be YYYY-MM')
+    if a.spots and a.broad:
+        p.error('--spots and --broad cannot be combined')
     if a.image_url and (a.url or a.no_ocr or len(a.image_url) > a.max_images):
         p.error('--image-url is OCR-only and must fit --max-images')
     if a.image_url and any(not allowed_host(u, asset=True) or not is_raster_candidate(u) for u in a.image_url):

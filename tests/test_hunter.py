@@ -68,6 +68,18 @@ class HunterTests(unittest.TestCase):
         self.assertGreater(image_priority('https://www.digikala.com/jakodi-tutorial-2.jpg', '', ''),
                            image_priority('https://www.digikala.com/black-friday.jpg', '', ''))
 
+    def test_spot_page_priority(self):
+        from dk_code_hunter import spot_page_priority
+        self.assertLess(spot_page_priority('https://www.digikala.com/landings/prize-catcher/'), 0)
+        self.assertLess(spot_page_priority('https://www.digikala.com/mag/video/example/'), 0)
+        self.assertGreater(spot_page_priority('https://www.digikala.com/landing/example/', 'اشتراک پلاس'),
+                           spot_page_priority('https://www.digikala.com/mag/black-friday/'))
+
+    def test_spot_image_priority(self):
+        from dk_code_hunter import spot_image_priority
+        self.assertGreater(spot_image_priority('https://www.digikala.com/abc.webp', 'hero banner'),
+                           spot_image_priority('https://www.digikala.com/jakodi-tutorial-2.jpg'))
+
 
 if __name__ == '__main__':
     unittest.main()

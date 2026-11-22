@@ -66,3 +66,11 @@ python scan_media.py video.mp4 screenshot.png --tiles --max-frames 60
 ```
 
 Video sampling can miss brief appearances of codes; use a smaller interval and a higher frame limit when appropriate. Results and image evidence are stored under `dk_results/media/`. Candidates need visual review and manual validation.
+
+### Unusual static locations
+
+```powershell
+python dk_code_hunter.py --spots --max-pages 15 --max-images 24 --tiles --output dk_spots
+```
+
+Spot mode ranks public service links and static banner, footer, slider and shortcut image candidates ahead of generic shopping articles. It skips the redemption page and video pages; it does not scan video files. Only links within the existing allowed domain scope are followed. `image_inventory.csv` lists ranked image URLs with their source pages. Rankings are heuristics, not proof of hidden codes. Tile OCR can still take time. Use `--url` to supply specific public starting pages.
