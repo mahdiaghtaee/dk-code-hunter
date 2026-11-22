@@ -47,3 +47,7 @@ The crawler uses public HTTPS pages, respects robots.txt, limits requests, and s
 ```powershell
 python -m unittest discover -s tests -v
 ```
+
+### Windows console encoding
+
+For UTF-8 logs, use `$env:PYTHONIOENCODING = 'utf-8'` and `python -X utf8 dk_code_hunter.py`. Legacy console encodings also fall back to escaped characters instead of aborting a scan. SVG and ICO assets are skipped by the raster OCR scanner.

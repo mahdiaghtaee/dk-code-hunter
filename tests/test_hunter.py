@@ -1,6 +1,6 @@
 import unittest
 
-from dk_code_hunter import PATTERN, allowed_host, canonical, priority, candidate_matches, image_priority
+from dk_code_hunter import PATTERN, allowed_host, canonical, priority, candidate_matches, image_priority, configure_console, is_raster_candidate
 
 
 class HunterTests(unittest.TestCase):
@@ -40,6 +40,20 @@ class HunterTests(unittest.TestCase):
         parser = Protego.parse('User-agent: *\nDisallow: *?*\nAllow: *?x-oss-process=image/*')
         self.assertFalse(parser.can_fetch('https://www.digikala.com/path?q=1', 'DKCampaignCodeFinder'))
         self.assertTrue(parser.can_fetch('https://www.digikala.com/path', 'DKCampaignCodeFinder'))
+
+    def test_non_raster_images(self):
+        self.assertFalse(is_raster_candidate('https://www.digikala.com/loading.SVG?v=2'))
+        self.assertTrue(is_raster_candidate('https://www.digikala.com/banner.webp'))
+
+    def test_legacy_console(self):
+        import io
+        from unittest.mock import patch
+        stream = io.TextIOWrapper(io.BytesIO(), encoding='cp1256')
+        with patch('sys.stdout', stream), patch('sys.stderr', stream):
+            configure_console()
+            print('\u06cc')
+            stream.flush()
+            self.assertIn(b'\\u06cc', stream.buffer.getvalue())
 
 
 if __name__ == '__main__':

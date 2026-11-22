@@ -6,6 +6,7 @@ import heapq
 import hashlib
 import io
 import re
+import sys
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -37,6 +38,17 @@ BLOCK = ('/product/', '/search/', '/cart', '/checkout', '/profile', '/login',
 ASSET_DOMAINS = ('digikala.com', 'digikalausercontent.com')
 IMG_EXT = re.compile(r'\.(?:png|jpe?g|webp|gif|avif)(?:$|\?)', re.I)
 CSS_URL = re.compile(r'url\(\s*[\'"]?([^\)\'"\s]+)', re.I)
+
+
+def configure_console():
+    # Windows PowerShell pipes may use a legacy code page.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, 'reconfigure'):
+            stream.reconfigure(errors='backslashreplace')
+
+
+def is_raster_candidate(url):
+    return not urlsplit(url).path.lower().endswith(('.svg', '.svgz', '.ico'))
 
 
 def allowed_host(url, asset=False):
@@ -209,7 +221,7 @@ class Hunter:
         if not value or value.startswith(('data:', 'blob:')):
             return
         url = canonical(urljoin(page, value.strip()), True)
-        if allowed_host(url, asset=True):
+        if allowed_host(url, asset=True) and is_raster_candidate(url):
             score = image_priority(url, page, label)
             if not self.args.broad and score < 0:
                 return
@@ -331,6 +343,10 @@ class Hunter:
             result = self.fetch(url, asset=True)
             if not result:
                 continue
+            content_type = result[1].split(';', 1)[0].strip().lower()
+            if content_type in ('image/svg+xml', 'text/html', 'application/xhtml+xml'):
+                self.stats['non_raster_images'] += 1
+                continue
             digest = hashlib.sha256(result[0]).digest()
             if digest in self.image_hashes:
                 self.stats['duplicate_images'] += 1
@@ -361,11 +377,13 @@ class Hunter:
                                     self.report(text, page, 'ocr', url)
                                 self.save()
             except Exception as exc:
-                print(f'[OCR SKIP] {exc}')
+                self.stats['ocr_errors'] += 1
+                print(f'[OCR SKIP] {url}: {exc}')
         self.save()
 
 
 def main():
+    configure_console()
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--url', action='append', help='Start URL; repeat for several URLs')
     p.add_argument('--max-pages', type=int, default=18)
