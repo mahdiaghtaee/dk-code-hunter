@@ -102,6 +102,31 @@ class HunterTests(unittest.TestCase):
         self.assertEqual(boxes[0][0], 0)
         self.assertEqual(boxes[-1][2], 14251)
 
+    def test_hidden_mode_selection(self):
+        from dk_code_hunter import hidden_rows
+        base = 'https://dkstatics-public.digikala.com/'
+        def row(path, w, h, **kwargs):
+            return dict(url=base + path, width=w, height=h, **kwargs)
+        payload = {'page': 'https://www.digikala.com/', 'images': [
+            row('digikala-adservice-banners/hero.jpg', 2800, 100),
+            row('digikala-products/photo.jpg', 80, 80),
+            row('digikala-static/icon.svg', 48, 48),
+            row('digikala-static/bg.webp', 240, 120, kind='background'),
+            row('digikala-static/video.mp4', 200, 100),
+            row('digikala-adservice-banners/footer.jpg', 800, 80, region='footer'),
+            row('digikala-static/icon.svg', 48, 48),
+        ]}
+        paths = [url for url, page, score in hidden_rows(payload)]
+        self.assertEqual(len(paths), 3)
+        self.assertTrue(any(url.endswith('icon.svg') for url in paths))
+        self.assertFalse(any('hero.jpg' in url for url in paths))
+
+    def test_svg_text_only(self):
+        from dk_code_hunter import svg_text
+        data = b'<svg xmlns="http://www.w3.org/2000/svg"><defs><text>DKDEF</text></defs><text>DKABC</text><text style="display:none">DKHID</text><script>DKSCR</script></svg>'
+        self.assertEqual(svg_text(data), 'DKABC')
+        self.assertEqual(svg_text(b'<!DOCTYPE svg [<!ENTITY x "DKXYZ">]><svg/>'), '')
+
 
 if __name__ == '__main__':
     unittest.main()

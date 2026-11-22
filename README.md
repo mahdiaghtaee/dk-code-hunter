@@ -86,3 +86,12 @@ python dk_code_hunter.py --browser-json dk-browser-images.json --tiles --output 
 ```
 
 This scans only listed advertising banner assets, subject to existing robots and request limits. Add `--include-static` to include the listed static assets too. OCR text is cached locally by pixel content and engine version; subsequent runs still download the images to check their content, but reuse cached OCR. Use `--no-cache` to force OCR. Wide banners use overlapping horizontal tiles. No videos are scanned in this mode.
+
+### Hidden-location mode
+
+On a public content page, run `export_hidden.js` in the browser console after normal page loading. The export includes loaded images, computed CSS background/mask URLs and matching visible inline SVG text, without requesting new resources. Save the resulting JSON to the project folder. Run:
+
+```powershell
+python dk_code_hunter.py --hidden --browser-json dk-hidden-images.json --max-images 30 --tiles --output dk_hidden
+```
+The mode prioritizes compact images and footer/background assets, excludes product images and prominent advertisement banners, permits small raster OCR and checks text elements of external SVGs without executing or rendering them. SVG path outlines and embedded raster artwork are not OCRed. Heuristics may miss codes and produce false matches; inspect results and unconfirmed.csv. Use --no-ocr for the inventory only. Existing robots/request restrictions and OCR cache remain active. Only use where allowed by site/campaign rules; no video processing or automated coupon submission.

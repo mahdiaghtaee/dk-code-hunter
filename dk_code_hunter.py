@@ -10,6 +10,7 @@ import re
 import sys
 import time
 import math
+import xml.etree.ElementTree as ET
 from collections import defaultdict
 from datetime import date
 from pathlib import Path
@@ -171,6 +172,80 @@ def browser_banner_rows(payload, include_static=False):
         label = str(row.get('alt') or '')
         score = (100 if ad else 30) + 20 * bool(CONTEXT.search(label))
         yield url, canonical(page, page == url), score
+
+
+def hidden_rows(payload):
+    rows = payload if isinstance(payload, list) else payload.get('images', [])
+    if not isinstance(rows, list):
+        raise ValueError('Browser manifest images must be a list')
+    selected = {}
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get('url'), str):
+            continue
+        url = canonical(row['url'], True)
+        page = row.get('page') or (payload.get('page') if isinstance(payload, dict) else None)
+        if not allowed_host(url, asset=True) or not isinstance(page, str) or not allowed_host(page):
+            continue
+        path = urlsplit(url).path.lower()
+        if re.search(r'/(?:digikala-products|products?|product_images?)/', path):
+            continue
+        if not (is_raster_candidate(url) or path.endswith('.svg')):
+            continue
+        try:
+            w, h = int(row.get('width', 0)), int(row.get('height', 0))
+            dw, dh = int(row.get('displayWidth', w)), int(row.get('displayHeight', h))
+        except (ValueError, TypeError, OverflowError):
+            continue
+        if min(w, h, dw, dh) < 16:
+            continue
+        label = str(row.get('alt') or '')
+        kind = row.get('kind', 'image')
+        region = row.get('region', '')
+        ad = '/digikala-adservice-banners/' in path
+        # Deliberately omit prominent public campaigns, retain compact/footer assets.
+        if ad and (dw >= 650 or w >= 2400) and region != 'footer':
+            continue
+        if ad and CONTEXT.search(label):
+            continue
+        if max(dw, dh) > 1000 and not (kind == 'background' or region == 'footer'):
+            continue
+        score = (35 if kind == 'background' else 0) + (25 if region == 'footer' else 0)
+        score += 25 if max(dw, dh) <= 200 else 10 if max(dw, dh) <= 500 else 0
+        score += 15 if path.endswith('.svg') else 0
+        score += 15 if SPOT_HINT.search(label + ' ' + path) else 0
+        score += 10 if re.search(r'/digikala-static/|/icons?/|/logos?/', path) else 0
+        if score <= 0:
+            continue
+        key = (url, canonical(page))
+        selected[key] = max(score, selected.get(key, 0))
+    for (url, page), score in sorted(selected.items(), key=lambda item: -item[1]):
+        yield url, page, score
+
+
+def svg_text(data):
+    # Inspect only textual SVG elements, never scripts, metadata or path data.
+    # No rendering, URL resolution or XML entity expansion.
+    if len(data) > 1_000_000 or re.search(br'<!\s*(?:DOCTYPE|ENTITY)', data, re.I):
+        return ''
+    if b'\x00' in data:
+        return ''
+    root = ET.fromstring(data)
+    if root.tag.rsplit('}', 1)[-1] != 'svg':
+        return ''
+    ignored = {'defs', 'metadata', 'script', 'style', 'symbol', 'title', 'desc', 'clipPath', 'mask'}
+    def walk(node):
+        tag = node.tag.rsplit('}', 1)[-1]
+        style = node.attrib.get('style', '').replace(' ', '').lower()
+        if (tag in ignored or node.attrib.get('display') == 'none'
+                or node.attrib.get('visibility') == 'hidden'
+                or 'display:none' in style or 'visibility:hidden' in style):
+            return
+        if tag == 'text':
+            yield ''.join(node.itertext())
+        else:
+            for child in node:
+                yield from walk(child)
+    return '\n'.join(walk(root))
 
 
 def tile_boxes(width, height):
@@ -485,6 +560,18 @@ class Hunter:
                 self.stats['images_unavailable'] += 1
                 continue
             content_type = result[1].split(';', 1)[0].strip().lower()
+            if self.args.hidden and (content_type == 'image/svg+xml' or urlsplit(url).path.lower().endswith('.svg')):
+                try:
+                    value = svg_text(result[0])
+                    self.stats['svg_text_checked'] += 1
+                    for page in sorted(self.images[url]):
+                        self.report(value, page, 'svg_text', url)
+                    if PATTERN.search(value):
+                        (evidence / f'svg_{i:05}.txt').write_text(url + '\n\n' + value, encoding='utf-8')
+                except (ET.ParseError, ValueError) as exc:
+                    self.stats['svg_errors'] += 1
+                    print(f'[SVG SKIP] {url}: {exc}')
+                continue
             if content_type.startswith(('video/', 'audio/')) or content_type in ('image/svg+xml', 'text/html', 'application/xhtml+xml'):
                 self.stats['non_raster_images'] += 1
                 continue
@@ -495,7 +582,8 @@ class Hunter:
             self.image_hashes.add(digest)
             try:
                 with Image.open(io.BytesIO(result[0])) as original:
-                    if original.width < 100 or original.height < 50 or original.width * original.height > 25_000_000:
+                    min_w, min_h = (16, 16) if self.args.hidden else (100, 50)
+                    if original.width < min_w or original.height < min_h or original.width * original.height > 25_000_000:
                         self.stats['images_size_skipped'] += 1
                         continue
                     self.stats['images_ocr'] += 1
@@ -506,13 +594,15 @@ class Hunter:
                         original.seek(frame)
                         img = original.convert('RGB')
                         gray = ImageOps.autocontrast(ImageOps.grayscale(img))
-                        scale = min(3, max(1, 1500 / max(gray.size)))
+                        scale = min(6 if self.args.hidden else 3, max(1, 1500 / max(gray.size)))
                         if scale > 1:
                             gray = gray.resize(tuple(round(v * scale) for v in gray.size), Image.Resampling.LANCZOS)
                         variants = [(gray, 11)]
                         if self.args.deep_ocr:
                             variants.extend([(img, 11), (ImageOps.invert(gray), 11)])
-                        if self.args.tiles:
+                        if self.args.hidden and max(img.size) <= 200:
+                            variants.append((gray, 7))
+                        if self.args.tiles and (not self.args.hidden or max(img.size) > 300):
                             for coords in tile_boxes(*gray.size):
                                 crop = gray.crop(coords)
                                 if min(crop.size) > 0:
@@ -551,6 +641,7 @@ def main():
     p.add_argument('--url', action='append', help='Start URL; repeat for several URLs')
     p.add_argument('--image-url', action='append', help='Scan only the specified public image URLs')
     p.add_argument('--browser-json', type=Path, help='Import banner URLs exported from the visible browser DOM')
+    p.add_argument('--hidden', action='store_true', help='Prioritize small and unusual public browser assets instead of large banners')
     p.add_argument('--include-static', action='store_true', help='Also include non-product static images from browser manifest')
     p.add_argument('--cache-dir', default='dk_ocr_cache', help='Local OCR text cache shared by scans')
     p.add_argument('--no-cache', action='store_true', help='Always perform OCR again')
@@ -578,6 +669,8 @@ def main():
         p.error('--campaign-month must be YYYY-MM')
     if a.spots and a.broad:
         p.error('--spots and --broad cannot be combined')
+    if a.hidden and (not a.browser_json or a.spots or a.broad):
+        p.error('--hidden requires --browser-json and cannot be combined with --spots or --broad')
     if a.browser_json and (a.url or a.image_url or a.render):
         p.error('--browser-json cannot be combined with --url, --image-url or --render')
     if a.image_url and (a.url or a.no_ocr or len(a.image_url) > a.max_images):
@@ -593,12 +686,19 @@ def main():
                 manifest = json.loads(a.browser_json.read_text(encoding='utf-8-sig'))
                 if not isinstance(manifest, (dict, list)):
                     raise ValueError('Expected an object or list')
-                for url, page, score in browser_banner_rows(manifest, a.include_static):
+                rows = hidden_rows(manifest) if a.hidden else browser_banner_rows(manifest, a.include_static)
+                for url, page, score in rows:
                     hunter.images[url].add(page)
-                    hunter.image_scores[url] = score
+                    hunter.image_scores[url] = max(score, hunter.image_scores.get(url, 0))
+                if a.hidden and isinstance(manifest, dict):
+                    page = manifest.get('page', '')
+                    if isinstance(page, str) and allowed_host(page):
+                        for value in manifest.get('svg_text', []):
+                            if isinstance(value, str):
+                                hunter.report(value[:500], canonical(page), 'browser_svg_text')
             except (OSError, ValueError) as exc:
                 p.error(f'Invalid browser manifest: {exc}')
-            print(f'[BROWSER] {len(hunter.images)} selected banner URLs')
+            print(f'[BROWSER] {len(hunter.images)} selected {"hidden-location assets" if a.hidden else "banner URLs"}')
         elif a.image_url:
             for url in a.image_url:
                 url = canonical(url, True)
